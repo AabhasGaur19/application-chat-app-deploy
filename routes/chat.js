@@ -8,9 +8,82 @@
 // // Helper function to get IST timestamp
 // const getISTDate = () => {
 //   const now = new Date();
-//   // IST is UTC+5:30
-//   const istOffset = 5.5 * 60 * 60 * 1000; // 5 hours 30 minutes in milliseconds
+//   const istOffset = 5.5 * 60 * 60 * 1000; // IST is UTC+5:30
 //   return new Date(now.getTime() + istOffset);
+// };
+
+// // Socket.io event handlers
+// router.handleSocket = (io, socket) => {
+//   const userId = socket.user.uid;
+
+//   // Join chat rooms
+//   socket.on('join:chat', ({ chatId }) => {
+//     socket.join(chatId);
+//     console.log(`${userId} joined chat ${chatId}`);
+//   });
+
+//   // Typing indicator
+//   socket.on('typing', ({ chatId, isTyping }) => {
+//     socket.to(chatId).emit('typing', { userId, isTyping });
+//   });
+
+//   // Mark message as delivered
+//   socket.on('message:delivered', async ({ messageId, chatId }) => {
+//     try {
+//       const message = await Message.findByIdAndUpdate(
+//         messageId,
+//         { status: 'delivered' },
+//         { new: true }
+//       );
+//       if (message) {
+//         io.to(chatId).emit('message:status', {
+//           messageId,
+//           status: 'delivered',
+//         });
+//       }
+//     } catch (error) {
+//       console.error('Error updating message status:', error);
+//     }
+//   });
+
+//   // Mark message as read
+//   socket.on('message:read', async ({ messageId, chatId }) => {
+//     try {
+//       const message = await Message.findByIdAndUpdate(
+//         messageId,
+//         { status: 'read' },
+//         { new: true }
+//       );
+//       if (message) {
+//         io.to(chatId).emit('message:status', {
+//           messageId,
+//           status: 'read',
+//         });
+//         // Update unread count
+//         const unreadCount = await Message.countDocuments({
+//           chatId,
+//           status: { $in: ['sent', 'delivered'] },
+//           senderId: { $ne: userId },
+//         });
+//         io.to(userId).emit('unread:count', { chatId, count: unreadCount });
+//       }
+//     } catch (error) {
+//       console.error('Error updating message status:', error);
+//     }
+//   });
+
+//   // Update last seen
+//   socket.on('last:seen', async () => {
+//     try {
+//       await User.findOneAndUpdate(
+//         { uid: userId },
+//         { lastSeen: getISTDate() }
+//       );
+//       io.emit('user:lastSeen', { uid: userId, lastSeen: getISTDate() });
+//     } catch (error) {
+//       console.error('Error updating last seen:', error);
+//     }
+//   });
 // };
 
 // router.post('/', verifyToken, async (req, res) => {
@@ -19,17 +92,13 @@
 //     if (!participantId) {
 //       return res.status(400).json({ error: 'Participant ID is required' });
 //     }
-//     // Verify participant exists
 //     const participant = await User.findOne({ uid: participantId }, 'uid displayName photoUrl');
 //     if (!participant) {
 //       return res.status(404).json({ error: 'Participant not found' });
 //     }
-//     // Normalize participant order to avoid duplicates
 //     const participants = [req.user.uid, participantId].sort();
-//     // Check for existing chat
 //     let chat = await Chat.findOne({ participants });
 //     if (chat) {
-//       // Populate participants for response
 //       const populatedChat = await Chat.findById(chat._id).populate({
 //         path: 'lastMessage',
 //         select: 'content createdAt',
@@ -42,12 +111,15 @@
 //         ],
 //         lastMessage: populatedChat.lastMessage,
 //         updatedAt: populatedChat.updatedAt,
+//         unreadCount: await Message.countDocuments({
+//           chatId: chat._id,
+//           status: { $in: ['sent', 'delivered'] },
+//           senderId: { $ne: req.user.uid },
+//         }),
 //       });
 //     }
-//     // Create new chat
 //     chat = new Chat({ participants, updatedAt: getISTDate() });
 //     await chat.save();
-//     // Return chat with populated participants
 //     res.status(201).json({
 //       _id: chat._id,
 //       participants: [
@@ -56,6 +128,7 @@
 //       ],
 //       lastMessage: null,
 //       updatedAt: chat.updatedAt,
+//       unreadCount: 0,
 //     });
 //   } catch (error) {
 //     console.error('Chat creation error:', error);
@@ -71,18 +144,23 @@
 //         select: 'content createdAt',
 //       })
 //       .sort({ updatedAt: -1 });
-//     // Manually populate participants
 //     const populatedChats = await Promise.all(
 //       chats.map(async (chat) => {
 //         const participants = await User.find(
 //           { uid: { $in: chat.participants } },
 //           'uid displayName photoUrl'
 //         );
+//         const unreadCount = await Message.countDocuments({
+//           chatId: chat._id,
+//           status: { $in: ['sent', 'delivered'] },
+//           senderId: { $ne: req.user.uid },
+//         });
 //         return {
 //           _id: chat._id,
 //           participants,
 //           lastMessage: chat.lastMessage,
 //           updatedAt: chat.updatedAt,
+//           unreadCount,
 //         };
 //       })
 //     );
@@ -109,14 +187,14 @@
 //       senderId: req.user.uid,
 //       content,
 //       createdAt: getISTDate(),
+//       status: 'sent',
 //     });
 //     await message.save();
 //     chat.lastMessage = message._id;
 //     chat.updatedAt = getISTDate();
 //     await chat.save();
-//     // Manually fetch sender details
 //     const sender = await User.findOne({ uid: message.senderId }, 'uid displayName photoUrl');
-//     res.status(201).json({
+//     const messageData = {
 //       _id: message._id,
 //       chatId: message.chatId,
 //       senderId: {
@@ -127,7 +205,24 @@
 //       content: message.content,
 //       status: message.status,
 //       createdAt: message.createdAt,
-//     });
+//     };
+//     // Emit real-time message
+//     if (req.io) {
+//       req.io.to(chatId).emit('message:new', messageData);
+//       // Update unread count for other participants
+//       const otherParticipants = chat.participants.filter(uid => uid !== req.user.uid);
+//       for (const uid of otherParticipants) {
+//         const unreadCount = await Message.countDocuments({
+//           chatId,
+//           status: { $in: ['sent', 'delivered'] },
+//           senderId: { $ne: uid },
+//         });
+//         req.io.to(uid).emit('unread:count', { chatId, count: unreadCount });
+//       }
+//     } else {
+//       console.warn('Socket.io instance not available, message saved but not emitted');
+//     }
+//     res.status(201).json(messageData);
 //   } catch (error) {
 //     console.error('Message sending error:', error);
 //     res.status(500).json({ error: 'Failed to send message', details: error.message });
@@ -144,7 +239,6 @@
 //     const messages = await Message.find({ chatId })
 //       .sort({ createdAt: 1 })
 //       .limit(50);
-//     // Manually populate senderId
 //     const populatedMessages = await Promise.all(
 //       messages.map(async (message) => {
 //         const sender = await User.findOne({ uid: message.senderId }, 'uid displayName photoUrl');
@@ -170,6 +264,7 @@
 // });
 
 // module.exports = router;
+
 const express = require('express');
 const router = express.Router();
 const verifyToken = require('../middleware/firebaseAuth');
@@ -350,9 +445,16 @@ router.post('/:chatId/messages', verifyToken, async (req, res) => {
     if (!content) {
       return res.status(400).json({ error: 'Message content is required' });
     }
-    const chat = await Chat.findById(chatId);
-    if (!chat || !chat.participants.includes(req.user.uid)) {
-      return res.status(403).json({ error: 'Invalid chat or unauthorized' });
+    let chat = await Chat.findById(chatId);
+    if (!chat) {
+      // Create new chat if it doesn't exist
+      const recipientId = req.user.uid === chatId.split('-')[0] ? chatId.split('-')[1] : chatId.split('-')[0];
+      const participants = [req.user.uid, recipientId].sort();
+      chat = new Chat({ participants, updatedAt: getISTDate() });
+      await chat.save();
+    }
+    if (!chat.participants.includes(req.user.uid)) {
+      return res.status(403).json({ error: 'Unauthorized' });
     }
     const message = new Message({
       chatId,
@@ -381,6 +483,10 @@ router.post('/:chatId/messages', verifyToken, async (req, res) => {
     // Emit real-time message
     if (req.io) {
       req.io.to(chatId).emit('message:new', messageData);
+      // Emit to participants' user rooms
+      chat.participants.forEach(uid => {
+        req.io.to(uid).emit('message:new', messageData);
+      });
       // Update unread count for other participants
       const otherParticipants = chat.participants.filter(uid => uid !== req.user.uid);
       for (const uid of otherParticipants) {
