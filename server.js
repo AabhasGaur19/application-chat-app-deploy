@@ -13,15 +13,20 @@ console.log('MONGO_URI defined:', !!process.env.MONGO_URI);
 console.log('FLUTTER_APP_URL:', process.env.FLUTTER_APP_URL);
 console.log('PORT:', process.env.PORT);
 
-const serviceAccount = require('./application-chat-flutter-firebase-adminsdk-fbsvc-81df3c9e8b.json');
+// Initialize Firebase Admin SDK
+let serviceAccount;
+if (process.env.FIREBASE_CREDENTIALS_BASE64) {
+  const decoded = Buffer.from(process.env.FIREBASE_CREDENTIALS_BASE64, 'base64').toString();
+  serviceAccount = JSON.parse(decoded);
+} else {
+  serviceAccount = require('./application-chat-flutter-firebase-adminsdk-fbsvc-81df3c9e8b.json');
+}
 
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server, {
   cors: {
-    origin: [
-      process.env.FLUTTER_APP_URL
-    ],
+    origin: process.env.FLUTTER_APP_URL,
     methods: ['GET', 'POST'],
   },
 });
@@ -39,9 +44,7 @@ app.use((req, res, next) => {
 });
 
 app.use(cors({
-  origin: [
-    process.env.FLUTTER_APP_URL  
-  ],
+  origin: process.env.FLUTTER_APP_URL,
   methods: ['GET', 'POST', 'PUT', 'DELETE'],
   allowedHeaders: ['Content-Type', 'Authorization'],
 }));
@@ -91,6 +94,6 @@ app.use((err, req, res, next) => {
 });
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, '0.0.0.0',() => {
+server.listen(PORT, '0.0.0.0', () => {
   console.log(`Server running on port ${PORT}`);
 });
